@@ -1,8 +1,8 @@
 {
    "metadata":{
       "id":"VSoft.HttpClient",
-      "version":"0.2.1",
-      "description":"Enables cooperative cancellation between threads",
+      "version":"0.9.0-alpha.1",
+      "description":"WinHttp base http client",
       "authors":"Vincent Parrett",
       "projectUrl":"https://github.com/VSoftTechnologies/VSoft.HttpClient",
       "license":"Apache-2.0",
@@ -69,6 +69,11 @@
          "compiler":"10.4",
          "platforms":"Win32, Win64",
          "template":"default"
+      },
+      {
+         "compiler":"11.0",
+         "platforms":"Win32, Win64",
+         "template":"default"
       }
    ],
    "templates":[
@@ -77,7 +82,7 @@
          "dependencies":[
             {
                "id":"VSoft.CancellationToken",
-               "version":"[0.0.2,]"
+               "version":"[0.0.4,]"
             }
          ],
          "source":[
