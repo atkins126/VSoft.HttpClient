@@ -1,4 +1,4 @@
-unit VSoft.HttpClient;
+﻿unit VSoft.HttpClient;
 
 interface
 
@@ -6,7 +6,8 @@ uses
   System.Classes,
   System.SysUtils,
   System.Typinfo,
-  VSoft.CancellationToken;
+  VSoft.CancellationToken,
+  VSoft.Uri;
 
 
 type
@@ -67,19 +68,24 @@ type
   IHttpClientInternal = interface
   ['{1F09A9A8-A32E-41F3-811B-BA7D5B352185}']
     function Send(const request : TRequest; const cancellationToken : ICancellationToken = nil) : IHttpResponse;overload;
-    procedure ReleaseRequest(const request : TRequest);
+    function GetBaseUri: string;
+    function GetUri : IUri;
+  end;
+
+  THttpClientBase = class(TInterfacedObject)
+  public
+    procedure ReleaseRequest(const request : TRequest);virtual;abstract;
   end;
 
 
   TRequest = class
   private
-    FClient : TObject;
+    FClient : THttpClientBase;
     FHttpMethod : THttpMethod;
     FHeaders : TStringList;
     FRequestParams : TStringList;
     FFiles : TStringList;
     FUrlSegments : TStringList;
-    FResource : string;
     FContent : TStream;
     FOwnsContent : boolean;
     FSaveAsFile : string;
@@ -90,6 +96,8 @@ type
     FPassword : string;
     FProxyUserName : string;
     FProxyPassword : string;
+
+    FURI : IUri;
   protected
     function GetHeaders : TStrings;
     function GetParameters : TStrings;
@@ -113,10 +121,11 @@ type
     function GetContentLength : Int64;
     function GetCharSet : string;
 
-    function Client : IHttpClientInternal;
+    function GetClient : IHttpClientInternal;
 
   public
-    constructor Create(const client : TObject; const resource : string);
+    constructor Create(const client : THttpClientBase; const resource : string);overload;
+    constructor Create(const client : THttpClientBase; const uri : IUri);overload;
     destructor Destroy; override;
 
 
@@ -187,7 +196,7 @@ type
 
     property FollowRedirects : boolean read FFollowRedirects write FFollowRedirects;
     property HtttpMethod : THttpMethod read FHttpMethod;
-    property Resource    : string read FResource write FResource;
+    property Resource    : string read GetResource write SetResource;
     property ContentLength : Int64 read GetContentLength;
     property SaveAsFile  : string read FSaveAsFile write FSaveAsFile;
     property UserName  : string read FUserName write FUserName;
@@ -224,7 +233,8 @@ type
     function GetPassword : string;
     procedure SetPassword(const value : string);
 
-    function CreateRequest(const resource : string) : TRequest;
+    function CreateRequest(const resource : string) : TRequest;overload;
+    function CreateRequest(const uri : IUri) : TRequest;overload;
 
     procedure UseSerializer(const useFunc : TUseSerializerFunc);overload;
     procedure UseSerializer(const serializer : IRestSerializer);overload;
@@ -240,7 +250,9 @@ type
   end;
 
   THttpClientFactory = class
-   class function CreateClient(const baseUri: string = ''): IHttpClient;
+   class function CreateClient(const uri: string): IHttpClient;overload;
+   class function CreateClient(const uri: IUri): IHttpClient;overload;
+
   end;
 
   EHttpClientException = class(Exception)
@@ -273,6 +285,7 @@ const
 implementation
 
 uses
+  System.StrUtils,
   VSoft.WinHttp.Api,
   VSoft.HttpClient.WinHttpClient,
   VSoft.HttpClient.MultipartFormData;
@@ -367,48 +380,99 @@ end;
 
 { TRequest }
 
-function TRequest.Client: IHttpClientInternal;
+function TRequest.GetClient: IHttpClientInternal;
 begin
   FClient.GetInterface(IHttpClientInternal, result)
 end;
 
-constructor TRequest.Create(const client: TObject;  const resource: string);
+constructor TRequest.Create(const client: THttpClientBase; const uri: IUri);
+var
+  queryParam : TQueryParam;
 begin
   FClient := client;
-  FResource := resource;
+  FURI := uri;
   FFiles := TStringlist.Create;
   FHeaders := TStringList.Create;
   FRequestParams := TStringList.Create;
   FUrlSegments := TStringList.Create;
   FFollowRedirects := true;
+
+  if Length(uri.QueryParams) > 0 then
+  begin
+    for queryParam in uri.QueryParams do
+      WithParameter(queryParam.Name, queryParam.Value);
+  end;
+end;
+
+function CombineUriParts(const a, b : string) : string;
+begin
+  result := '';
+  if (not EndsText('/', a)) and (not StartsText('/',b)) then //neither
+    result := a + '/' + b
+  else if (EndsText('/', a)) and StartsText('/',b)  then // both
+  begin
+    result := Copy(a, 1, Length(a) -1) + b;
+  end
+  else //one of
+    result := a + b
+end;
+
+
+constructor TRequest.Create(const client: THttpClientBase;  const resource: string);
+var
+  uri : IUri;
+  error : string;
+  clientInf : IHttpClientInternal;
+  sBaseUri : string;
+begin
+  if not client.GetInterface(IHttpClientInternal, clientInf) then
+    raise Exception.Create('Client does not implement interface!');
+  sBaseUri := clientInf.GetBaseUri;
+  if sBaseUri <> '' then
+     sBaseUri := CombineUriParts(sBaseUri, resource)
+  else
+    sBaseUri := resource;
+
+  if not TUriFactory.TryParseWithError(sBaseUri, true, uri, error) then
+    raise EArgumentException.Create('Invalid Uri : ' + error);
+
+  Create(client, uri);
+
 end;
 
 function TRequest.Delete(const cancellationToken: ICancellationToken): IHttpResponse;
+var
+  lClient : IHttpClientInternal;
 begin
   FHttpMethod := THttpMethod.DELETE;
-  result := Client.Send(self, cancellationToken);
+  lClient := GetClient;
+  result := lClient.Send(self, cancellationToken);
 end;
 
 function TRequest.Delete<T>(const entity : T; const cancellationToken: ICancellationToken): IHttpResponse;
 var
   entityType : PTypeInfo;
+  lClient : IHttpClientInternal;
 begin
   raise ENotImplemented.Create('Serialization/Deserialization not implemented yet');
   FHttpMethod := THttpMethod.DELETE;
   entityType := TypeInfo(T);
   //TODO : Serialize entity
-
-  result := Client.Send(self,cancellationToken);
+  lClient := GetClient;
+  result := lClient.Send(self,cancellationToken);
 end;
 
 destructor TRequest.Destroy;
 begin
-  Client.ReleaseRequest(self);
-  FClient := nil;
+  //cannot use client internal interface here as we are called from the client destructor.
+  THttpClientBase(FClient).ReleaseRequest(Self);
   FFiles.Free;
   FHeaders.Free;
   FRequestParams.Free;
   FUrlSegments.Free;
+  if FContent <> nil then
+    FContent.Free;
+  FClient := nil;
   inherited;
 end;
 
@@ -419,21 +483,26 @@ begin
 end;
 
 function TRequest.Get(const cancellationToken: ICancellationToken): IHttpResponse;
+var
+  lClient : IHttpClientInternal;
 begin
   FHttpMethod := THttpMethod.GET;
-  result := Client.Send(Self, cancellationToken);
+  lClient := GetClient;
+  result := lClient.Send(Self, cancellationToken);
 end;
 
 function TRequest.Get<T>(const cancellationToken: ICancellationToken): T;
 var
   returnType : PTypeInfo;
   response : IHttpResponse;
+  lClient : IHttpClientInternal;
 begin
   raise ENotImplemented.Create('Deserialization not implemented yet');
 
   FHttpMethod := THttpMethod.GET;
   returnType := TypeInfo(T);
-  response := Client.Send(self, cancellationToken);
+  lClient := GetClient;
+  response := lClient.Send(self, cancellationToken);
   //TODO : deserialized the response
   result := nil
 end;
@@ -489,11 +558,11 @@ begin
       if j > 0 then
         formdata.AddFile(Copy(sFileName, 1, j-1),  Copy(sFileName, j+1, Length(sFileName)),FFiles.ValueFromIndex[i])
       else
-        formdata.AddFile('files',  Copy(sFileName, j+1, Length(sFileName)),FFiles.ValueFromIndex[i]);
+        formdata.AddFile('file' + IntToStr(i),  Copy(sFileName, j+1, Length(sFileName)),FFiles.ValueFromIndex[i]);
     end;
-    //generate creates a new boundary so we need to upate the contentype before generating
+    FContent := formdata.Generate; //taking ownership here!
     SetContentType(formdata.ContentType);
-    result := formdata.Generate;
+    result := FContent;
   end
   else if FRequestParams.Count > 0 then
   begin
@@ -518,7 +587,11 @@ end;
 function TRequest.GetCharSet: string;
 begin
   if FEncoding <> nil then
+  {$If CompilerVersion > 33.0} //10.4+
     result := FEncoding.MIMEName
+  {$ELSE}
+    result := FEncoding.EncodingName
+  {$IFEND}
   else
     result := '';
 end;
@@ -551,7 +624,7 @@ end;
 
 function TRequest.GetResource: string;
 begin
-  result := FResource;
+  result := FURI.AbsolutePath;
 end;
 
 function TRequest.GetUrlSegments: TStrings;
@@ -560,9 +633,12 @@ begin
 end;
 
 function TRequest.Patch(const cancellationToken: ICancellationToken): IHttpResponse;
+var
+  lClient : IHttpClientInternal;
 begin
   FHttpMethod := THttpMethod.PATCH;
-  result := Client.Send(self, cancellationToken);
+  lClient := GetClient;
+  result := lClient.Send(self, cancellationToken);
 end;
 
 function TRequest.Patch<T, R>(const entity : T; const cancellationToken: ICancellationToken): R;
@@ -570,12 +646,14 @@ var
   entityType : PTypeInfo;
   returnType : PTypeInfo;
   response : IHttpResponse;
+  lClient : IHttpClientInternal;
 begin
   raise ENotImplemented.Create('Serialization/Deserialization not implemented yet');
   FHttpMethod := THttpMethod.PATCH;
   entityType := TypeInfo(T);
   returnType := TypeInfo(R);
-  response := Client.Send(Self, cancellationToken);
+  lClient := GetClient;
+  response := lClient.Send(Self, cancellationToken);
 
   result := nil;
 end;
@@ -584,20 +662,25 @@ function TRequest.Patch<T>(const entity : T; const cancellationToken: ICancellat
 var
   entityType : PTypeInfo;
   response : IHttpResponse;
+  lClient : IHttpClientInternal;
 begin
   raise ENotImplemented.Create('Serialization/Deserialization not implemented yet');
 
   FHttpMethod := THttpMethod.PATCH;
   entityType := TypeInfo(T);
-  response := Client.Send(self, cancellationToken);
+  lClient := GetClient;
+  response := lClient.Send(self, cancellationToken);
 
   result := nil;
 end;
 
 function TRequest.Post(const cancellationToken: ICancellationToken): IHttpResponse;
+var
+  lClient : IHttpClientInternal;
 begin
   FHttpMethod := THttpMethod.POST;
-  result := Client.Send(self, cancellationToken);
+  lClient := GetClient;
+  result := lClient.Send(self, cancellationToken);
 end;
 
 function TRequest.Post<T, R>(const entity : T; const cancellationToken: ICancellationToken): R;
@@ -605,20 +688,22 @@ var
   entityType : PTypeInfo;
   returnType : PTypeInfo;
   response : IHttpResponse;
+  lClient : IHttpClientInternal;
 begin
   raise ENotImplemented.Create('Serialization/Deserialization not implemented yet');
 
   FHttpMethod := THttpMethod.POST;
   entityType := TypeInfo(T);
   returnType := TypeInfo(R);
-  response := Client.Send(Self, cancellationToken );
-
+  lClient := GetClient;
+  response := lClient.Send(Self, cancellationToken );
   result := nil;
 end;
 
 function TRequest.Post<T>(const entity : T;  const cancellationToken: ICancellationToken): IHttpResponse;
 var
   entityType : PTypeInfo;
+  lClient : IHttpClientInternal;
 begin
   raise ENotImplemented.Create('Serialization not implemented yet');
 
@@ -626,14 +711,17 @@ begin
   entityType := TypeInfo(T);
 
   //TODO : serialize entity
-
-  result := Client.Send(self, cancellationToken);
+  lClient := GetClient;
+  result := lClient.Send(self, cancellationToken);
 end;
 
 function TRequest.Put(const cancellationToken: ICancellationToken): IHttpResponse;
+var
+  lClient : IHttpClientInternal;
 begin
   FHttpMethod := THttpMethod.PUT;
-  result := Client.Send(self, cancellationToken);
+  lClient := GetClient;
+  result := lClient.Send(self, cancellationToken);
 end;
 
 function TRequest.Put<T, R>(const entity: T; const cancellationToken: ICancellationToken): R;
@@ -641,13 +729,14 @@ var
   entityType : PTypeInfo;
   returnType : PTypeInfo;
   response : IHttpResponse;
+  lClient : IHttpClientInternal;
 begin
   raise ENotImplemented.Create('Serialization/Deserialization not implemented yet');
   FHttpMethod := THttpMethod.PUT;
   entityType := TypeInfo(T);
   returnType := TypeInfo(R);
-
-  response := Client.Send(Self, cancellationToken );
+  lClient := GetClient;
+  response := lClient.Send(Self, cancellationToken );
 
   result := nil;
 
@@ -656,14 +745,15 @@ end;
 function TRequest.Put<T>(const entity : T;  const cancellationToken: ICancellationToken): IHttpResponse;
 var
   entityType : PTypeInfo;
+  lClient : IHttpClientInternal;
 begin
   raise ENotImplemented.Create('Serialization/Deserialization not implemented yet');
   FHttpMethod := THttpMethod.PUT;
   entityType := TypeInfo(T);
 
   //TODO : Serialize!
-
-  result := Client.Send(self, cancellationToken);
+  lClient := GetClient;
+  result := lClient.Send(self, cancellationToken);
 end;
 
 procedure TRequest.SetAccept(const value: string);
@@ -693,7 +783,7 @@ end;
 
 procedure TRequest.SetResource(const value: string);
 begin
-  FResource := value;
+ FURI.Path := value;
 end;
 
 
@@ -787,7 +877,7 @@ begin
    if fieldName <> '' then
     FFiles.Add(fieldName + ',' + filePath + '=' + contentType)
   else
-    FFiles.Add('files,' + filePath + '=' + contentType);
+    FFiles.Add(ExtractFileName(filePath) + ',' + filePath + '=' + contentType);
 end;
 
 function TRequest.WithHeader(const name, value: string): TRequest;
@@ -810,9 +900,20 @@ end;
 
 { THttpClientFactory }
 
-class function THttpClientFactory.CreateClient( const baseUri: string): IHttpClient;
+class function THttpClientFactory.CreateClient(const uri : string): IHttpClient;
+var
+  theUri : IUri;
+  error : string;
 begin
-  result := THttpClient.Create(baseUri);
+  if not TUriFactory.TryParseWithError(uri, true, theUri, error)  then
+    raise EArgumentOutOfRangeException.Create('Invalid Uri : ' + error );
+
+  result := THttpClient.Create(theUri);
+end;
+
+class function THttpClientFactory.CreateClient(const uri: IUri): IHttpClient;
+begin
+  result := THttpClient.Create(uri);
 end;
 
 { EHttpClientException }

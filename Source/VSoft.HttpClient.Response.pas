@@ -1,9 +1,9 @@
-{***************************************************************************}
+﻿{***************************************************************************}
 {                                                                           }
 {           VSoft.HttpClient - A wrapper over WinHttp                       }
 {                              modelled on restSharp                        }
 {                                                                           }
-{           Copyright � 2020 Vincent Parrett and contributors               }
+{           Copyright © 2020 Vincent Parrett and contributors               }
 {                                                                           }
 {           vincent@finalbuilder.com                                        }
 {           https://www.finalbuilder.com                                    }
@@ -121,6 +121,7 @@ end;
 destructor THttpResponse.Destroy;
 begin
   FStream.Free;
+  FHeaders.Free;
   inherited;
 end;
 
@@ -360,7 +361,11 @@ procedure THttpResponse.WriteBuffer(const buffer: TBytes; const length : NativeI
 begin
   if FStream = nil then
     exit;
-  FStream.WriteData(buffer, length);
+  {$IF CompilerVersion > 23.0} //XE3+
+    FStream.WriteData(buffer, length);
+  {$ELSE}
+    FStream.WriteBuffer(buffer, length);
+  {$IFEnd}
 end;
 
 end.
