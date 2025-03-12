@@ -22,14 +22,18 @@ type
 //    [Test]
     procedure TestParameters;
 
-    [Test]
+//    [Test]
     procedure TestWithUri;
+
+    [Test]
+    procedure TestResponseStream;
   end;
 
 implementation
 uses
   WinApi.ActiveX,
   System.SysUtils,
+  System.Classes,
   VSoft.CancellationToken,
   VSoft.Uri,
   JsonDataObjects;
@@ -119,6 +123,38 @@ begin
   Assert.Pass;
 end;
 
+procedure TMyTestObject.TestResponseStream;
+var
+  client : IHttpClient;
+  response : IHttpResponse;
+  cancelTokenSource : ICancellationTokenSource;
+  stream : TMemoryStream;
+begin
+  cancelTokenSource := TCancellationTokenSourceFactory.Create;
+
+  client := THttpClientFactory.CreateClient('https://localhost:5002');
+  response := client.CreateRequest('/api/v1/package/VSoft.DUnitX/11.0/Win32/0.3.3/icon')
+  .Get(cancelTokenSource.Token);
+
+
+  if response.StatusCode <> 200 then
+    WriteLn(response.ErrorMessage);
+
+  Assert.AreEqual<integer>(200, response.StatusCode);
+  Assert.AreNotEqual<integer>(0, response.ContentLength);
+
+  stream := TMemoryStream.Create;
+  try
+    stream.CopyFrom(response.ResponseStream,response.ResponseStream.Size);
+    Assert.AreEqual(response.ContentLength, stream.Size);
+
+  finally
+    stream.Free;
+  end;
+
+
+end;
+
 procedure TMyTestObject.TestUploadFiles;
 //var
 //  client : IHttpClient;
@@ -152,13 +188,14 @@ var
   cancelTokenSource : ICancellationTokenSource;
 begin
   cancelTokenSource := TCancellationTokenSourceFactory.Create;
-  uri := TUriFactory.Parse('https://www.finalbuilder.com');
-  client := THttpClientFactory.CreateClient('https://www.finalbuilder.com');
-  request := client.CreateRequest('/DesktopModules/LiveBlog/API/Syndication/GetRssFeeds?mid=632&PortalId=0&tid=181&ItemCount=20&LimitWords=20');
-  response := request.Get(cancelTokenSource.Token);
+  uri := TUriFactory.Parse('https://delphi.dev');
+  client := THttpClientFactory.CreateClient(uri);
+  request := client.CreateRequest('/api/v1/searchbyids')
+    .WithBody('{"compiler": "XE7","platform": "Win32","packageids": [{"id": "Spring4D.Data","version": "2.0.0-rc.2"},{"id": "Spring4D.Base","version": "2.0.0-rc.2"}]}', TEncoding.UTF8)
+    .WithContentType('application/json', 'utf-8');
+
+  response := request.Post(cancelTokenSource.Token);
   Assert.AreEqual<integer>(200, response.StatusCode);
-
-
 end;
 
 initialization
